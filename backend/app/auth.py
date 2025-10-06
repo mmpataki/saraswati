@@ -42,6 +42,38 @@ async def introspect_token(token: str, settings: SaraswatiSettings) -> Dict[str,
     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unsupported auth mode")
 
 
+def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure a consistent user claim shape for downstream code.
+
+    - `sub` is the canonical subject (falls back to `user_id` or `id`).
+    - `username` is derived from `username` or `preferred_username` or `name`.
+    - `name` and `roles` are present (empty or from claims).
+    """
+    if not isinstance(claims, dict):
+        return claims
+
+    # canonical subject
+    sub = claims.get("sub") or claims.get("user_id") or claims.get("id") or claims.get("username")
+    if sub:
+        claims["sub"] = sub
+
+    # username fallback
+    username = claims.get("username") or claims.get("preferred_username") or claims.get("name") or sub
+    if username:
+        claims["username"] = username
+
+    # name
+    if "name" not in claims and username:
+        claims["name"] = username
+
+    # roles normalization
+    roles = claims.get("roles") or claims.get("role") or claims.get("roles")
+    if roles is None:
+        claims["roles"] = []
+
+    return claims
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_security),
     settings: SaraswatiSettings = Depends(get_settings),
@@ -77,10 +109,10 @@ async def get_current_user(
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login did not return a token")
 
             claims = await introspect_token(token, settings)
-            return claims
+            return _normalize_claims(claims)
 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Authorization header")
 
     token = credentials.credentials
     claims = await introspect_token(token, settings)
-    return claims
+    return _normalize_claims(claims)
