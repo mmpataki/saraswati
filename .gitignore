@@ -1,0 +1,17 @@
+# Python
+**/.venv/
+__pycache__/
+**/linuxvenv/
+*.pyc
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/**/*.js
+
+# IDE/VSC
+.vscode/
+.DS_Store
+
+config.yml
+architecture.md

@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+motor
+pymongo
+pyyaml
+httpx
+python-multipart
+pytest
+pytest-asyncio
+elasticsearch[async]
+fastapi-mcp
+PyJWT

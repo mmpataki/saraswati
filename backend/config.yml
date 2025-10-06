@@ -1,0 +1,37 @@
+environment: development
+frontend_base_path: /knowledge
+api_prefix: /knowledge/api
+store_backend: elastic
+auth_system: introspect
+auth_external:
+  service: http://localhost:5001
+  login_path: /api/auth/login
+  introspect_path: /api/auth/introspect
+  audience: saraswati
+  cache_ttl_seconds: 300
+auth_native:
+  jwt_secret: test-secret-change-me
+  jwt_algorithm: HS256
+  audience: saraswati
+  cache_ttl_seconds: 300
+mongo:
+  uri: mongodb://localhost:27017
+  database: saraswati
+  notes_collection: notes
+  versions_collection: note_versions
+  reviews_collection: note_reviews
+  review_events_collection: note_review_events
+elasticsearch:
+  hosts:
+    - http://localhost:9200
+  notes_index: notes
+  versions_index: note_versions
+  reviews_index: note_reviews
+  review_events_index: note_review_events
+  users_index: saraswati_users_v1
+embedding:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: nomic-embed-text
+  timeout_seconds: 30
+  

@@ -1,0 +1,629 @@
+import {
+  ChangeEvent,
+  FocusEvent,
+  KeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import {
+  Badge,
+  Box,
+  Button,
+  ButtonGroup,
+  CloseButton,
+  Flex,
+  Grid,
+  GridItem,
+  Heading,
+  HStack,
+  Image,
+  Input,
+  InputGroup,
+  InputLeftElement,
+  Select,
+  Slider,
+  SliderFilledTrack,
+  SliderThumb,
+  SliderTrack,
+  Spinner,
+  Stack,
+  Text,
+  Tooltip,
+} from "@chakra-ui/react";
+import { AtSignIcon, SearchIcon } from "@chakra-ui/icons";
+import { MdLocalOffer } from "react-icons/md";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Link, useSearchParams } from "react-router-dom";
+
+import { api } from "../api/client";
+import { NotesStats, SearchResponse, SearchResult } from "../types";
+import { useSearchNavigation } from "../hooks/useSearchNavigation";
+
+type SearchPayload = {
+  query: string;
+  page: number;
+  includeDrafts: boolean;
+  author?: string;
+  tags?: string[];
+};
+
+export function SearchPage(): JSX.Element {
+  const PAGE_SIZE = 10;
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { goToTag, goToAuthor } = useSearchNavigation();
+
+  const [query, setQuery] = useState("");
+  const [authorFilter, setAuthorFilter] = useState("");
+  const [tagInput, setTagInput] = useState("");
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [includeDrafts, setIncludeDrafts] = useState(false);
+  const [page, setPage] = useState(1);
+  const [minScore, setMinScore] = useState(0);
+  const [sortOption, setSortOption] = useState("relevance");
+  const [isSliderTooltipOpen, setSliderTooltipOpen] = useState(false);
+
+  const logoSrc = useMemo(() => new URL("/assets/saraswati.png", import.meta.url).href, []);
+
+  const statsQuery = useQuery<NotesStats>({
+    queryKey: ["notes-stats"],
+    queryFn: async () => {
+      const { data } = await api.get<NotesStats>("/notes/stats");
+      return data;
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const search = useMutation<SearchResponse, unknown, SearchPayload>(async (payload: SearchPayload) => {
+    const body: Record<string, unknown> = {
+      query: payload.query,
+      page: payload.page,
+      page_size: PAGE_SIZE,
+    };
+    if (payload.author) {
+      body.author = payload.author;
+    }
+    if (payload.tags && payload.tags.length > 0) {
+      body.tags = payload.tags;
+    }
+    const { data} = await api.post<SearchResponse>(
+      `/notes/search?includeDrafts=${payload.includeDrafts}`,
+      body
+    );
+    return data;
+  });
+
+  const runSearch = search.mutate;
+
+  const paramsSignature = searchParams.toString();
+
+  useEffect(() => {
+    const params = new URLSearchParams(paramsSignature);
+
+    const rawQueryParam = params.get("query");
+    const normalizedQueryParam = rawQueryParam === null ? "" : rawQueryParam === "*" ? "" : rawQueryParam;
+    setQuery((prev) => (prev === normalizedQueryParam ? prev : normalizedQueryParam));
+
+    const paramAuthor = params.get("author") ?? "";
+    setAuthorFilter((prev) => (prev === paramAuthor ? prev : paramAuthor));
+
+    const tagsParamRaw = params.get("tags") ?? "";
+    const nextTags = tagsParamRaw
+      ? Array.from(
+          new Set(
+            tagsParamRaw
+              .split(",")
+              .map((tag) => tag.trim().toLowerCase())
+              .filter((tag) => tag.length > 0)
+          )
+        )
+      : [];
+    setTagFilters((prev) => {
+      const prevKey = prev.join(",");
+      const nextKey = nextTags.join(",");
+      if (prevKey === nextKey) {
+        return prev;
+      }
+      return nextTags;
+    });
+    setTagInput("");
+
+    const includeDraftsParam = params.get("includeDrafts") === "true";
+    setIncludeDrafts((prev) => (prev === includeDraftsParam ? prev : includeDraftsParam));
+
+    const pageParam = Math.max(parseInt(params.get("page") ?? "1", 10) || 1, 1);
+    setPage((prev) => (prev === pageParam ? prev : pageParam));
+
+    const hasExplicitQuery = rawQueryParam !== null;
+    const hasAuthorFilter = paramAuthor.trim().length > 0;
+    const hasTagFilters = nextTags.length > 0;
+    const hasIncludeDraftsParam = params.has("includeDrafts");
+    const hasPageParam = params.has("page");
+
+    if (!(hasExplicitQuery || hasAuthorFilter || hasTagFilters || hasIncludeDraftsParam || hasPageParam)) {
+      return;
+    }
+
+    const requestQuery = normalizedQueryParam.length > 0 ? normalizedQueryParam : "*";
+    const requestAuthor = paramAuthor.trim().length > 0 ? paramAuthor.trim().toLowerCase() : undefined;
+
+    runSearch({
+      query: requestQuery,
+      page: pageParam,
+      includeDrafts: includeDraftsParam,
+      author: requestAuthor,
+      tags: nextTags,
+    });
+
+    if (pageParam === 1) {
+      setMinScore(0);
+      setSortOption("relevance");
+    }
+  }, [paramsSignature, runSearch]);
+
+  const computeQueryParam = useCallback((): string => {
+    const param = searchParams.get("query");
+    if (param && param.trim().length > 0) {
+      return param.trim();
+    }
+    const trimmed = query.trim();
+    return trimmed.length > 0 ? trimmed : "*";
+  }, [query, searchParams]);
+
+  const buildAndSetSearchParams = useCallback(
+    (
+      nextPage: number,
+      draftsFlag: boolean,
+      overrides?: Partial<{ query: string; author: string; tags: string[] }>
+    ) => {
+      const resolvedQuery = overrides?.query ?? query;
+      const normalizedQuery = resolvedQuery.trim();
+      const queryToken =
+        resolvedQuery === "*"
+          ? "*"
+          : normalizedQuery.length > 0
+            ? normalizedQuery
+            : "";
+
+      const resolvedAuthor = overrides?.author ?? authorFilter;
+      const normalizedAuthor = resolvedAuthor.trim().length > 0 ? resolvedAuthor.trim().toLowerCase() : "";
+
+      const resolvedTags = overrides?.tags ?? tagFilters;
+      const normalizedTags = Array.from(
+        new Set(resolvedTags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length > 0))
+      );
+
+      const params: Record<string, string> = {};
+      if (queryToken) {
+        params.query = queryToken;
+      }
+      if (normalizedAuthor) {
+        params.author = normalizedAuthor;
+      }
+      if (normalizedTags.length > 0) {
+        params.tags = normalizedTags.join(",");
+      }
+      if (draftsFlag) {
+        params.includeDrafts = "true";
+      }
+      if (nextPage > 1) {
+        params.page = nextPage.toString();
+      }
+
+      setSearchParams(params);
+    },
+    [authorFilter, query, tagFilters, setSearchParams]
+  );
+
+  const handleAddTag = useCallback((value?: string) => {
+    const rawValue = (value ?? "").trim().toLowerCase();
+    if (!rawValue) {
+      setTagInput("");
+      return;
+    }
+    setTagFilters((prev) => (prev.includes(rawValue) ? prev : [...prev, rawValue]));
+    setTagInput("");
+  }, []);
+
+  const handleTagInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      handleAddTag(event.currentTarget.value);
+    }
+  };
+
+  const handleRemoveTag = useCallback(
+    (tag: string) => {
+      setTagFilters((prev) => {
+        if (!prev.includes(tag)) {
+          return prev;
+        }
+        const next = prev.filter((item) => item !== tag);
+        const active = searchParams.toString().length > 0;
+        if (active) {
+          const nextQuery = computeQueryParam();
+          buildAndSetSearchParams(1, includeDrafts, { tags: next, query: nextQuery });
+        }
+        return next;
+      });
+    },
+    [buildAndSetSearchParams, computeQueryParam, includeDrafts, searchParams]
+  );
+
+  const handleClearFilters = useCallback(() => {
+    const active = searchParams.toString().length > 0;
+    setAuthorFilter("");
+    setTagFilters([]);
+    setTagInput("");
+    if (active) {
+      setMinScore(0);
+      setSortOption("relevance");
+      setPage(1);
+      const nextQuery = computeQueryParam();
+      buildAndSetSearchParams(1, includeDrafts, { author: "", tags: [], query: nextQuery });
+    }
+  }, [buildAndSetSearchParams, computeQueryParam, includeDrafts, searchParams]);
+
+  const handleSearch = useCallback(() => {
+    const pendingTag = tagInput.trim().toLowerCase();
+    const nextTags = pendingTag && !tagFilters.includes(pendingTag) ? [...tagFilters, pendingTag] : tagFilters;
+    if (pendingTag && !tagFilters.includes(pendingTag)) {
+      setTagFilters(nextTags);
+    }
+
+    setTagInput("");
+    setMinScore(0);
+    setSortOption("relevance");
+    setPage(1);
+
+    const nextQuery = query.trim().length > 0 ? query.trim() : "*";
+    buildAndSetSearchParams(1, includeDrafts, { query: nextQuery, tags: nextTags });
+  }, [buildAndSetSearchParams, includeDrafts, query, tagFilters, tagInput]);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      handleSearch();
+    }
+  };
+
+  const handleIncludeDraftsChange = useCallback(
+    (nextValue: boolean) => {
+      setIncludeDrafts(nextValue);
+      setMinScore(0);
+      setSortOption("relevance");
+      setPage(1);
+      const nextQuery = computeQueryParam();
+      buildAndSetSearchParams(1, nextValue, { query: nextQuery });
+    },
+    [buildAndSetSearchParams, computeQueryParam]
+  );
+
+  const handlePageChange = useCallback(
+    (nextPage: number) => {
+      if (nextPage < 1) {
+        return;
+      }
+      setPage(nextPage);
+      const nextQuery = computeQueryParam();
+      buildAndSetSearchParams(nextPage, includeDrafts, { query: nextQuery });
+    },
+    [buildAndSetSearchParams, computeQueryParam, includeDrafts]
+  );
+
+  const hasSearched = search.isLoading || search.isSuccess;
+
+  const currentResults = search.data?.items ?? [];
+  const filteredResults = currentResults.filter((result: SearchResult) => result.score * 100 >= minScore);
+  const sortedResults = sortOption === "relevance"
+    ? filteredResults
+    : [...filteredResults].sort((a, b) => {
+        const aDate = new Date(a.version.created_at).getTime();
+        const bDate = new Date(b.version.created_at).getTime();
+        const aUser = a.version.created_by.toLowerCase();
+        const bUser = b.version.created_by.toLowerCase();
+
+        switch (sortOption) {
+          case "date-desc":
+            return bDate - aDate;
+          case "date-asc":
+            return aDate - bDate;
+          case "user-asc":
+            return aUser.localeCompare(bUser);
+          case "user-desc":
+            return bUser.localeCompare(aUser);
+          default:
+            return 0;
+        }
+      });
+  const totalMatches = search.data?.total ?? 0;
+  const totalPages = search.data?.total_pages ?? 0;
+
+  return (
+    <Stack spacing={6}>
+      <Flex
+        direction="column"
+        align={hasSearched ? "flex-start" : "center"}
+        justify={hasSearched ? "flex-start" : "center"}
+        minH={hasSearched ? "auto" : "40vh"}
+        transition="all 0.3s ease"
+      >
+        {!hasSearched && (
+          <Box textAlign="center" mb={6}>
+            <Image src={logoSrc} alt="Saraswati" mx="auto" maxW="200px" mb={4} />
+            <Heading size="lg" fontWeight={400} mb={0} textAlign="center" color="github.fg.muted">
+              Search Knowledge
+            </Heading>
+          </Box>
+        )}
+
+        <HStack
+          spacing={3}
+          align="center"
+          w={hasSearched ? "100%" : "full"}
+          maxW={hasSearched ? "800px" : "600px"}
+        >
+          <InputGroup size={hasSearched ? "md" : "lg"}>
+            <InputLeftElement pointerEvents="none" h="full">
+              <SearchIcon color="github.fg.muted" fontSize="sm" />
+            </InputLeftElement>
+            <Input
+              value={query}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setQuery(event.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Search by keyword or tag"
+              bg="github.bg.primary"
+              borderColor="github.border.default"
+              _hover={{ borderColor: "github.border.emphasis" }}
+              _focus={{ borderColor: "github.accent.emphasis", boxShadow: "0 0 0 2px rgba(9, 105, 218, 0.25)" }}
+            />
+          </InputGroup>
+          <Button
+            onClick={handleSearch}
+            size={hasSearched ? "md" : "lg"}
+            variant="primary"
+            isLoading={search.isLoading}
+          >
+            Search
+          </Button>
+        </HStack>
+
+        {!hasSearched && statsQuery.data && (
+          <Text
+            mt={6}
+            fontSize="xs"
+            color="github.fg.muted"
+            maxW="800px"
+            textAlign="center"
+          >
+            {`Total notes: ${statsQuery.data.total_notes} · Approved: ${statsQuery.data.approved_versions} · Drafts: ${statsQuery.data.draft_versions} · Needs review: ${statsQuery.data.needs_review_versions} · Unique tags: ${statsQuery.data.distinct_tags} · Active authors: ${statsQuery.data.active_authors}`}
+          </Text>
+        )}
+
+        {hasSearched && (
+          <HStack spacing={2} align="center" maxW="800px" w="100%" mt={4}>
+            <Text fontSize="xs" color="github.fg.muted">
+              Include drafts:
+            </Text>
+            <ButtonGroup size="xs" isAttached variant="outline">
+              <Button
+                onClick={() => handleIncludeDraftsChange(false)}
+                variant={!includeDrafts ? "solid" : "outline"}
+                bg={!includeDrafts ? "github.accent.emphasis" : "transparent"}
+                color={!includeDrafts ? "white" : "github.fg.default"}
+                borderColor="github.border.default"
+                _hover={{ bg: !includeDrafts ? "github.accent.emphasis" : "github.bg.secondary" }}
+              >
+                No
+              </Button>
+              <Button
+                onClick={() => handleIncludeDraftsChange(true)}
+                variant={includeDrafts ? "solid" : "outline"}
+                bg={includeDrafts ? "github.accent.emphasis" : "transparent"}
+                color={includeDrafts ? "white" : "github.fg.default"}
+                borderColor="github.border.default"
+                _hover={{ bg: includeDrafts ? "github.accent.emphasis" : "github.bg.secondary" }}
+              >
+                Yes
+              </Button>
+            </ButtonGroup>
+          </HStack>
+        )}
+
+        {search.data && (
+          <Box maxW="800px" w="100%">
+            <Text fontSize="xs" color="github.fg.muted" mb={1}>
+              Minimum match score: {minScore}%
+            </Text>
+            <Slider
+              min={0}
+              max={100}
+              step={5}
+              value={minScore}
+              onChange={(value: number) => setMinScore(value)}
+              onMouseEnter={() => setSliderTooltipOpen(true)}
+              onMouseLeave={() => setSliderTooltipOpen(false)}
+            >
+              <SliderTrack bg="github.border.muted">
+                <SliderFilledTrack bg="github.accent.emphasis" />
+              </SliderTrack>
+              <Tooltip
+                hasArrow
+                placement="top"
+                isOpen={isSliderTooltipOpen}
+                label={`${minScore}%`}
+                bg="github.accent.emphasis"
+                color="white"
+              >
+                <SliderThumb boxSize={4} />
+              </Tooltip>
+            </Slider>
+          </Box>
+        )}
+      </Flex>
+
+      {search.isLoading && (
+        <Flex justify="center" py={12}>
+          <Spinner thickness="3px" color="github.accent.emphasis" />
+        </Flex>
+      )}
+
+      {search.isError && !search.isLoading && (
+        <Box maxW="800px">
+          <Text fontSize="sm" color="red.400" py={4}>
+            Something went wrong while searching. Please try again.
+          </Text>
+        </Box>
+      )}
+
+      {search.data && currentResults.length === 0 && !search.isLoading && (
+        <Box maxW="800px">
+          <Text fontSize="sm" color="github.fg.muted" py={4}>
+            No matching notes found. Try a different search term.
+          </Text>
+        </Box>
+      )}
+
+      {search.data && currentResults.length > 0 && (
+        <Stack spacing={4} maxW="800px">
+          <Flex justify="space-between" align="center" pb={2} gap={3} flexWrap="wrap">
+            <Text fontSize="sm" color="github.fg.muted">
+              Showing {sortedResults.length} of {currentResults.length} results on this page · Total matches: {totalMatches}
+            </Text>
+            <HStack spacing={2} align="center">
+              <Text fontSize="xs" color="github.fg.muted">Sort by</Text>
+              <Select
+                size="xs"
+                value={sortOption}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) => setSortOption(event.target.value)}
+                bg="github.bg.primary"
+                borderColor="github.border.default"
+                maxW="180px"
+              >
+                <option value="relevance">Relevance</option>
+                <option value="date-desc">Newest first</option>
+                <option value="date-asc">Oldest first</option>
+                <option value="user-asc">Author A → Z</option>
+                <option value="user-desc">Author Z → A</option>
+              </Select>
+            </HStack>
+          </Flex>
+          {sortedResults.length === 0 && (
+            <Box py={4}>
+              <Text fontSize="sm" color="github.fg.muted">
+                No results meet the selected score threshold.
+              </Text>
+            </Box>
+          )}
+          {sortedResults.map((result: SearchResult) => (
+            <Box key={result.version.version_id} py={3} px={2}>
+              <Stack spacing={1}>
+                <Box
+                  as={Link}
+                  to={`/note/${result.version.id}`}
+                  textDecoration="none"
+                  _hover={{ textDecoration: "none" }}
+                >
+                  <Heading
+                    size="md"
+                    fontWeight={500}
+                    color="github.accent.fg"
+                    _hover={{ textDecoration: "underline" }}
+                    display="inline"
+                  >
+                    {result.version.title}
+                  </Heading>
+                </Box>
+
+                <HStack spacing={2} fontSize="2xs" color="github.fg.muted" divider={<Text>·</Text>} flexWrap="wrap">
+                  <Text color="github.success.fg">match {(result.score * 100).toFixed(0)}%</Text>
+                  <Text>{new Date(result.version.created_at).toLocaleDateString()}</Text>
+                </HStack>
+
+                <Text fontSize="sm" color="github.fg.default" noOfLines={2} lineHeight="1.4">
+                  {result.version.content}
+                </Text>
+
+                <HStack spacing={2} fontSize="xs" color="github.fg.muted" pt={1} flexWrap="wrap">
+                  <Badge
+                    display="inline-flex"
+                    alignItems="center"
+                    gap={1}
+                    fontSize="2xs"
+                    px={2}
+                    py={0.5}
+                    borderRadius="full"
+                    bg="gray.200"
+                    color="gray.700"
+                    textTransform="lowercase"
+                  >
+                    <AtSignIcon boxSize={2.5} />
+                    {result.version.created_by.toLowerCase()}
+                  </Badge>
+                  {result.version.tags.slice(0, 5).map((tag: string) => (
+                    <Badge
+                      key={tag}
+                      display="inline-flex"
+                      alignItems="center"
+                      gap={1}
+                      fontSize="2xs"
+                      px={2}
+                      py={0.5}
+                      borderRadius="full"
+                      bg="teal.100"
+                      color="teal.700"
+                      textTransform="lowercase"
+                    >
+                      <MdLocalOffer size={10} />
+                      {tag.toLowerCase()}
+                    </Badge>
+                  ))}
+                  <Text>↑ {result.version.upvotes}</Text>
+                  <Text>↓ {result.version.downvotes}</Text>
+                  {result.version.state === "needs_review" && result.version.active_review_id && (
+                    <Button
+                      as={Link}
+                      to={`/review/${result.version.active_review_id}`}
+                      size="xs"
+                      colorScheme="orange"
+                      variant="ghost"
+                      borderColor="github.border.default"
+                    >
+                      Open review
+                    </Button>
+                  )}
+                </HStack>
+              </Stack>
+            </Box>
+          ))}
+
+          {totalPages > 1 && (
+            <HStack justify="space-between" align="center" pt={2}>
+              <Text fontSize="xs" color="github.fg.muted">
+                Page {page} of {totalPages}
+              </Text>
+              <ButtonGroup size="sm" variant="outline">
+                <Button
+                  onClick={() => handlePageChange(Math.max(1, page - 1))}
+                  isDisabled={page <= 1 || search.isLoading}
+                >
+                  Previous
+                </Button>
+                <Button
+                  onClick={() => handlePageChange(page + 1)}
+                  isDisabled={page >= totalPages || search.isLoading}
+                >
+                  Next
+                </Button>
+              </ButtonGroup>
+            </HStack>
+          )}
+        </Stack>
+      )}
+    </Stack>
+  );
+}
+
