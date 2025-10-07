@@ -198,13 +198,16 @@ def cancel_review(review_id: str, comment: Optional[str] = None) -> str:
 
 
 @mcp.tool()
-def create_note(title: str, content: str, tags: str = "") -> str:
+def create_note(title: str, content: str, tags: str = "", reviewers: str = "mpataki", review_title: Optional[str] = None, review_description: Optional[str] = None) -> str:
     """
-    Create a new note
+    Create a new note with the given title, content, and tags, and submit it for review.
     Inputs:
         title: Note title
         content: Markdown content
         tags: Comma-separated tags
+        reviewers: comma-separated reviewer ids to assign to the review
+        review_title: Optional title for the review (defaults to 'Review: <note title>')
+        review_description: Optional description for the review
     Returns:
         Result of the submission or error message.
     """
@@ -227,7 +230,22 @@ def create_note(title: str, content: str, tags: str = "") -> str:
     
     # Submit for review
     submit_payload: Dict[str, Any] = {}
-    
+    # include optional review metadata
+    if review_title and review_title.strip():
+        submit_payload["title"] = review_title.strip()
+    else:
+        submit_payload["title"] = f"Review: {title}"
+
+    if review_description and review_description.strip():
+        submit_payload["description"] = review_description.strip()
+    else:
+        submit_payload["description"] = f"please review the note."
+
+    if reviewers:
+        ids = [r.strip() for r in reviewers.split(",") if r.strip()]
+        if ids:
+            submit_payload["reviewer_ids"] = ids
+
     submit_result = _request("post", f"/notes/versions/{version_id}/submit", json=submit_payload)
     
     if "error" in submit_result:

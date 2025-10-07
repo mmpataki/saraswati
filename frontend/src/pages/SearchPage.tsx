@@ -518,25 +518,6 @@ export function SearchPage(): JSX.Element {
                 </ButtonGroup>
               </HStack>
 
-              {/* Sort options */}
-              <HStack spacing={2}>
-                <Text fontSize="xs" color="gray.600" fontWeight={500}>Sort:</Text>
-                <Select
-                  size="sm"
-                  value={sortOption}
-                  onChange={(e) => {
-                    const next = e.target.value;
-                    setSortOption(next);
-                    // rebuild params and trigger a search
-                    buildAndSetSearchParams(1, includeDrafts, allowDeleted, { query: computeQueryParam(), author: authorFilter, tags: tagFilters });
-                  }}
-                >
-                  <option value="relevance">Relevance</option>
-                  <option value="upvotes">Upvotes</option>
-                  <option value="downvotes">Downvotes</option>
-                </Select>
-              </HStack>
-
               {/* Author Dropdown */}
               <Menu closeOnSelect={false}>
                 {() => (
