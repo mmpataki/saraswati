@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from app.hooks import notify_observers
 from fastapi import HTTPException, status
 
 from ..models import (
@@ -94,6 +95,7 @@ class ReviewsService:
         refreshed = await self.repository.get_review(review.id or "")
         return version, refreshed or review
 
+    @notify_observers("review.commented")
     async def comment_on_review(self, review_id: str, author_id: str, message: str) -> ReviewEvent:
         review = await self._require_review(review_id)
         if review.status == ReviewStatus.MERGED and not message:
@@ -105,6 +107,7 @@ class ReviewsService:
             message=message,
         )
 
+    @notify_observers("review.approved")
     async def approve_review(self, review_id: str, reviewer_id: str, comment: Optional[str] = None) -> Review:
         review = await self._require_review(review_id)
         if review.status in {ReviewStatus.MERGED, ReviewStatus.CLOSED}:
@@ -137,6 +140,7 @@ class ReviewsService:
         )
         return updated_review
 
+    @notify_observers("review.changes_requested")
     async def request_changes(self, review_id: str, reviewer_id: str, comment: Optional[str] = None) -> Review:
         review = await self._require_review(review_id)
         if review.status == ReviewStatus.MERGED:
@@ -183,6 +187,7 @@ class ReviewsService:
         )
         return updated_review
 
+    @notify_observers("review.closed")
     async def close_review(self, review_id: str, actor_id: str, message: Optional[str] = None) -> Review:
 
         review = await self._require_review(review_id)
@@ -220,6 +225,7 @@ class ReviewsService:
         )
         return updated_review
 
+    @notify_observers("review.reopened")
     async def reopen_review(self, review_id: str, actor_id: str, message: Optional[str] = None) -> Review:
         review = await self._require_review(review_id)
         if review.status not in {ReviewStatus.CLOSED, ReviewStatus.CHANGES_REQUESTED}:
@@ -253,6 +259,7 @@ class ReviewsService:
         )
         return updated_review
 
+    @notify_observers("review.updated")
     async def update_review(
         self,
         review_id: str,
@@ -334,6 +341,7 @@ class ReviewsService:
         )
         return updated_review
 
+    @notify_observers("review.merged")
     async def merge_review(self, review_id: str, reviewer_id: str, comment: Optional[str] = None) -> Tuple[Review, NoteVersion]:
         review = await self._require_review(review_id)
         if review.status == ReviewStatus.MERGED:

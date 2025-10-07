@@ -286,6 +286,36 @@ def update_note_version(
     return _dump_yaml(result)
 
 
+@mcp.tool()
+def update_draft(note_id: str, title: str, content: str, tags: List[str]) -> str:
+    """
+    Update a draft for a note by posting to /notes/{note_id}/draft.
+
+    Inputs:
+        note_id: ID of the note to update the draft for
+        title: new title for the draft (keep the same title if not changing)
+        content: new content of the draft 
+        tags: list of tags (add or remove tags to the existing set and pass it here)
+
+    Returns YAML with the updated version or an error.
+    """
+    if not note_id:
+        return _dump_yaml({"error": "note_id is required"})
+
+    payload: Dict[str, Any] = {}
+    payload["title"] = title
+    payload["content"] = content
+    payload["tags"] = tags
+
+    if not payload:
+        return _dump_yaml({"error": "No fields provided to update"})
+
+    result = _request("post", f"/notes/{note_id}/draft", json=payload)
+    if "error" in result:
+        return _dump_yaml({"error": "Failed to update draft", "details": result})
+    return _dump_yaml({"success": True, "version": result})
+
+
 def _vote(note_id: str, action: str) -> Dict[str, Any]:
     return _request("post", f"/notes/{note_id}/vote", json={"action": action})
 

@@ -7,6 +7,7 @@ from typing import List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, HttpUrl, model_validator
+from typing import Dict
 
 
 DEFAULT_CONFIG_PATH = Path(os.getenv("SARASWATI_CONFIG", Path.cwd() / "config.yml"))
@@ -97,7 +98,7 @@ class SaraswatiSettings(BaseModel):
         "elastic",
         description=(
             "Auth system selection: 'introspect' to use a remote provider, 'decode' to locally decode JWTs, "
-            "or 'elastic' to use an Elasticsearch-backed user store with locally-issued JWTs."
+            "or 'elastic' to use an Elasticsearch-backed user store with locally-issued JWTs"
         ),
     )
     # legacy/top-level auth holder (kept as an empty/defaulted object for compatibility)
@@ -107,6 +108,14 @@ class SaraswatiSettings(BaseModel):
     mongo: Optional[MongoConfig] = None
     elasticsearch: Optional[ElasticsearchConfig] = None
     embedding: EmbeddingConfig
+    # HTTP callback endpoints to notify observers about lifecycle events (order preserved)
+    # Each webhook can specify headers and the list of events it cares about.
+    class WebhookConfig(BaseModel):
+        url: HttpUrl = Field(..., description="Callback URL for the observer")
+        headers: Optional[Dict[str, str]] = Field(default_factory=dict, description="Optional headers to send with the callback")
+        events: List[str] = Field(default_factory=list, description="List of event names to receive. Empty list means all events")
+
+    webhooks: List[WebhookConfig] = Field(default_factory=list, description="List of observer webhook configs")
 
     @model_validator(mode="after")
     def _validate_backend(self) -> "SaraswatiSettings":

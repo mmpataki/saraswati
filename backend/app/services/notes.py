@@ -5,6 +5,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Literal, TYPE_CHECKING
 from fastapi import HTTPException, status
 
 from ..config import SaraswatiSettings, get_settings
+from ..hooks import notify_observers
 import logging
 from ..models import Note, NoteState, NoteVersion
 from ..repositories.interface import NotesRepositoryProtocol
@@ -22,6 +23,7 @@ class NotesService:
         self.repository = repository
         self.settings = settings or get_settings()
 
+    @notify_observers("note.created")
     async def create_note(
         self,
         author_id: str,
@@ -32,6 +34,7 @@ class NotesService:
         vector = await compute_embedding(f"{title}\n{content}", settings=self.settings)
         return await self.repository.create_note_with_version(title, content, tags, author_id, vector)
 
+    @notify_observers("note.draft_updated")
     async def update_draft(
         self,
         version_id: str,
@@ -65,6 +68,7 @@ class NotesService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found after update")
         return updated_version
 
+    @notify_observers("note.review_submitted")
     async def submit_for_review(
         self,
         version_id: str,
@@ -88,6 +92,7 @@ class NotesService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version missing after submit")
         return updated
 
+    @notify_observers("note.approved")
     async def approve_version(
         self,
         version_id: str,
@@ -202,9 +207,11 @@ class NotesService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No versions for note")
         return versions
 
+    @notify_observers("note.deleted")
     async def delete_note(self, note_id: str, deleter_id: str) -> None:
         """Mark a note as deleted (soft delete)."""
-        await self.repository.mark_note_deleted(note_id, deleter_id)
+        result = await self.repository.mark_note_deleted(note_id, deleter_id)
+        return result
 
     async def restore_note(self, note_id: str, restorer_id: str) -> None:
         """Restore a soft-deleted note."""
