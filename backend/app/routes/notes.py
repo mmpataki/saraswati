@@ -113,7 +113,11 @@ class SearchRequest(BaseModel):
     page_size: int = Field(10, ge=1, le=50)
     author: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
-    sort_by: Optional[Literal["relevance", "upvotes", "downvotes"]] = None
+    sort_by: Optional[Literal["relevance", "author", "created_at", "committed_by"]] = None
+    committed_by: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    states: List[NoteState] = Field(default_factory=list)
+    min_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class VoteRequest(BaseModel):
@@ -125,12 +129,20 @@ class SearchResult(BaseModel):
     score: float
 
 
+class SearchFacets(BaseModel):
+    authors: List[str] = Field(default_factory=list)
+    committers: List[str] = Field(default_factory=list)
+    reviewers: List[str] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
+
+
 class SearchResponse(BaseModel):
     items: List[SearchResult]
     page: int
     page_size: int
     total: int
     total_pages: int
+    facets: SearchFacets
 
 
 class NotesStatsResponse(BaseModel):
@@ -411,22 +423,28 @@ async def review_queue(
 async def search_notes(
     payload: SearchRequest,
     include_drafts: bool = Query(False, alias="includeDrafts"),
-    allow_deleted: bool = Query(False, alias="allowDeleted"),
+    include_deleted: bool = Query(False, alias="includeDeleted"),
+    legacy_allow_deleted: Optional[bool] = Query(None, alias="allowDeleted"),
     user: Dict[str, Any] = Depends(get_current_user),
     service: NotesService = Depends(get_notes_service),
     reviews_service: ReviewsService = Depends(get_reviews_service),
 ) -> SearchResponse:
+    resolved_include_deleted = include_deleted or bool(legacy_allow_deleted)
     offset = (payload.page - 1) * payload.page_size
-    results, total = await service.search(
+    results, total, facets = await service.search(
         keyword=payload.query,
         vector=payload.vector,
         sort_by=payload.sort_by,
         offset=offset,
         limit=payload.page_size,
         include_drafts=include_drafts,
-        allow_deleted=allow_deleted,
+        allow_deleted=resolved_include_deleted,
         author=payload.author,
         tags=payload.tags or None,
+        committed_by=payload.committed_by,
+        reviewed_by=payload.reviewed_by,
+        states=payload.states or None,
+        min_score=payload.min_score,
     )
     versions = [version for version, _ in results]
     notes_map = await service.get_notes_by_ids([version.note_id for version in versions])
@@ -460,6 +478,7 @@ async def search_notes(
         page_size=payload.page_size,
         total=total,
         total_pages=total_pages,
+        facets=SearchFacets(**facets),
     )
 
 
@@ -498,6 +517,34 @@ async def get_all_tags(
     """Get list of all unique tags used in notes."""
     tags = await service.get_all_tags()
     return TagsResponse(tags=sorted(tags))
+
+
+class CommittersResponse(BaseModel):
+    committers: List[str]
+
+
+@router.get("/committers", response_model=CommittersResponse)
+async def get_all_committers(
+    user: Dict[str, Any] = Depends(get_current_user),
+    service: NotesService = Depends(get_notes_service),
+) -> CommittersResponse:
+    """Get list of all unique committers."""
+    committers = await service.get_all_committers()
+    return CommittersResponse(committers=committers)
+
+
+class ReviewersResponse(BaseModel):
+    reviewers: List[str]
+
+
+@router.get("/reviewers", response_model=ReviewersResponse)
+async def get_all_reviewers(
+    user: Dict[str, Any] = Depends(get_current_user),
+    service: NotesService = Depends(get_notes_service),
+) -> ReviewersResponse:
+    """Get list of all unique reviewers."""
+    reviewers = await service.get_all_reviewers()
+    return ReviewersResponse(reviewers=reviewers)
 
 
 @router.post("/{note_id}/vote", response_model=NoteResponse)

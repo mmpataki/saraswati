@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -9,7 +8,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
-from .database import get_mongo_client
+from .elasticsearch_client import get_elasticsearch_client
 from .routes import auth as auth_routes
 from .routes import notes as notes_routes
 from .routes import reviews as reviews_routes
@@ -67,16 +66,19 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        # Touch the mongo client to ensure it's created at startup
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, get_mongo_client)
+        # Warm up the Elasticsearch client so failures surface early
+        get_elasticsearch_client(settings)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
-        client = get_mongo_client()
-        client.close()
+        client = get_elasticsearch_client(settings)
+        await client.close()
 
     return app
 
 
 app = create_app()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)

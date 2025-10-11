@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field, ConfigDict, field_serializer
 class NoteState(str, Enum):
     DRAFT = "draft"
     NEEDS_REVIEW = "needs_review"
+    OLD_DRAFT = "old_draft"
     APPROVED = "approved"
+    DELETED = "deleted"
+    OLD = "old"
 
 
 class NoteVersion(BaseModel):

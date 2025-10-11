@@ -4,6 +4,7 @@ from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 from ..models import (
     Note,
+    NoteState,
     NoteVersion,
     Review,
     ReviewEvent,
@@ -82,10 +83,21 @@ class NotesRepositoryProtocol(Protocol):
     ) -> Optional[Note]:
         ...
 
-    async def keyword_search(self, query: str, limit: int = 10) -> List[NoteVersion]:
-        ...
-
-    async def vector_search(self, vector: List[float], limit: int = 5) -> List[Tuple[NoteVersion, float]]:
+    async def hybrid_search(
+        self,
+        *,
+        keyword: Optional[str] = None,
+        vector: Optional[List[float]] = None,
+        limit: int = 50,
+        include_drafts: bool = False,
+        allow_deleted: bool = False,
+        states: Optional[List[NoteState]] = None,
+        author: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        committed_by: Optional[str] = None,
+        reviewed_by: Optional[str] = None,
+        sort_by: Optional[str] = None,
+    ) -> Tuple[List[Tuple[NoteVersion, float]], int, Dict[str, List[str]]]:
         ...
 
     async def get_drafts_by_note_ids(self, note_ids: Iterable[str]) -> Dict[str, NoteVersion]:

@@ -24,7 +24,6 @@ from ..models import (
 )
 from .interface import NotesRepositoryProtocol
 
-
 class ElasticsearchNotesRepository(NotesRepositoryProtocol):
     """Elasticsearch-backed notes persistence layer."""
 
@@ -498,66 +497,121 @@ class ElasticsearchNotesRepository(NotesRepositoryProtocol):
             return None
         return await self.get_note(note_id)
 
-    async def keyword_search(self, query: str, limit: int = 10) -> List[NoteVersion]:
+    async def hybrid_search(
+        self,
+        *,
+        keyword: Optional[str] = None,
+        vector: Optional[List[float]] = None,
+        limit: int = 50,
+        include_drafts: bool = False,
+        allow_deleted: bool = False,
+        states: Optional[List[NoteState]] = None,
+        author: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        committed_by: Optional[str] = None,
+        reviewed_by: Optional[str] = None,
+        sort_by: Optional[str] = None,
+    ) -> Tuple[List[Tuple[NoteVersion, float]], int, Dict[str, List[str]]]:
         await self._ensure_indices()
-        size = max(limit * 3, 20)
-        # Treat wildcard or empty queries as match_all so that searching "*" returns all
-        # documents rather than no results.
-        if query is None or query.strip() == "" or query.strip() == "*":
-            es_query = {"match_all": {}}
-        else:
-            es_query = {
-                "bool": {
-                    "must": [
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title^2", "content", "tags"],
-                            }
+        
+        resolved_states = [NoteState.APPROVED.value]
+        if include_drafts:
+            resolved_states.append(NoteState.NEEDS_REVIEW.value)
+        if allow_deleted:
+            resolved_states.append(NoteState.DELETED.value)
+
+        filter_clauses: List[Dict[str, Any]] = [
+            {"terms": {"state": resolved_states}},
+        ]
+        if author:
+            filter_clauses.append({"term": {"created_by": author}})
+        if committed_by:
+            filter_clauses.append({"term": {"committed_by": committed_by}})
+        if reviewed_by:
+            filter_clauses.append({"term": {"reviewed_by": reviewed_by}})
+        if tags:
+            filter_clauses.append(
+                {
+                    "terms_set": {
+                        "tags": {
+                            "terms": list(tags),
+                            "minimum_should_match_script": {"source": "params.num_terms"},
                         }
-                    ],
+                    }
                 }
-            }
+            )
 
-        response = await self.client.search(
-            index=self._versions_index,
-            size=size,
-            query=es_query,
-        )
-        hits = [self._hit_to_version(hit) for hit in response.get("hits", {}).get("hits", [])]
-        priority = {
-            NoteState.APPROVED: 0,
-            NoteState.NEEDS_REVIEW: 1,
-            NoteState.DRAFT: 2,
-        }
-        hits.sort(key=lambda version: priority.get(version.state, 99))
-        return hits[:limit]
-
-    async def vector_search(self, vector: List[float], limit: int = 5) -> List[Tuple[NoteVersion, float]]:
-        await self._ensure_indices()
-        response = await self.client.search(
-            index=self._versions_index,
-            size=max(limit * 5, 50),
-            query={
-                "bool": {
-                    "must": [
-                        {"term": {"state": NoteState.APPROVED.value}},
-                    ],
-                    "filter": [
-                        {"exists": {"field": "vector"}},
-                    ],
+        bool_query: Dict[str, Any] = {"filter": filter_clauses}
+        normalized_keyword = (keyword or "").strip()
+        if normalized_keyword and normalized_keyword != "*":
+            bool_query.setdefault("must", []).append(
+                {
+                    "multi_match": {
+                        "query": normalized_keyword,
+                        "fields": ["title^2", "content", "tags"],
+                    }
                 }
+            )
+
+        resolved_sort = (sort_by or "relevance").lower()
+        sort_clauses: List[Dict[str, Any]] = []
+        key_map = {"author": "created_by", "created_at": "created_at", "committed_by": "committed_by"}
+        if resolved_sort != "relevance":
+            sort_clauses = [{key_map[resolved_sort]: {"order": "asc"}}]
+
+        search_kwargs: Dict[str, Any] = {
+            "index": self._versions_index,
+            "size": max(limit, 10),
+            "track_total_hits": True,
+            "aggs": {
+                "authors": {"terms": {"field": "created_by", "size": 100}},
+                "committers": {"terms": {"field": "committed_by", "size": 100}},
+                "reviewers": {"terms": {"field": "reviewed_by", "size": 100}},
+                "tags": {"terms": {"field": "tags", "size": 200}},
             },
-        )
-        scored: List[Tuple[NoteVersion, float]] = []
-        for hit in response.get("hits", {}).get("hits", []):
+        }
+
+        if sort_clauses:
+            search_kwargs["sort"] = sort_clauses
+
+        if bool_query.get("filter") or bool_query.get("must"):
+            search_kwargs["query"] = {"bool": bool_query}
+        else:
+            search_kwargs["query"] = {"match_all": {}}
+
+        if vector:
+            search_kwargs["knn"] = {
+                "field": "vector",
+                "query_vector": vector,
+                "k": max(limit * 2, 20),
+                "num_candidates": max(limit * 10, 200),
+            }
+            if filter_clauses:
+                search_kwargs["knn"]["filter"] = {"bool": {"filter": filter_clauses}}
+
+        response = await self.client.search(**search_kwargs)
+        hits = response.get("hits", {})
+        total = int(hits.get("total", {}).get("value", len(hits.get("hits", []))))
+        results: List[Tuple[NoteVersion, float]] = []
+        for hit in hits.get("hits", []):
             version = self._hit_to_version(hit)
-            if not version.vector:
-                continue
-            score = self._cosine_similarity(vector, version.vector)
-            scored.append((version, score))
-        scored.sort(key=lambda item: item[1], reverse=True)
-        return scored[:limit]
+            score = float(hit.get("_score", 0.0) or 0.0)
+            results.append((version, score))
+
+        aggregations = response.get("aggregations", {}) or {}
+
+        def _extract(name: str) -> List[str]:
+            buckets = aggregations.get(name, {}).get("buckets", [])
+            values = [bucket.get("key") for bucket in buckets if isinstance(bucket.get("key"), str) and bucket.get("key")]
+            return sorted(set(values))
+
+        facets = {
+            "authors": _extract("authors"),
+            "committers": _extract("committers"),
+            "reviewers": _extract("reviewers"),
+            "tags": _extract("tags"),
+        }
+        return results, total, facets
 
     async def get_drafts_by_note_ids(self, note_ids: Iterable[str]) -> Dict[str, NoteVersion]:
         await self._ensure_indices()

@@ -10,7 +10,6 @@ import logging
 from ..models import Note, NoteState, NoteVersion
 from ..repositories.interface import NotesRepositoryProtocol
 from .embedding import compute_embedding
-from .search import hybrid_search
 
 if TYPE_CHECKING:
     from ..models import Review
@@ -105,6 +104,11 @@ class NotesService:
         if version.state != NoteState.NEEDS_REVIEW:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Version is not awaiting review")
 
+        note = await self.repository.get_note(version.note_id)
+        if not note:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent note not found")
+        previous_current_id = note.current_version_id if note.current_version_id != version_id else None
+
         updates = {
             "state": NoteState.APPROVED,
             "committed_by": reviewer_id,
@@ -116,6 +120,16 @@ class NotesService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Failed to approve version")
 
         await self.repository.set_note_current_version(approved.note_id, version_id, committed_by=reviewer_id)
+
+        if previous_current_id:
+            await self.repository.update_version(previous_current_id, {"state": NoteState.OLD})
+
+        await self._transition_versions(
+            approved.note_id,
+            from_states=[NoteState.DRAFT, NoteState.NEEDS_REVIEW],
+            to_state=NoteState.OLD_DRAFT,
+            exclude=[approved.id],
+        )
         return approved
 
     async def create_draft_from_current(
@@ -152,6 +166,12 @@ class NotesService:
             updated = await self.repository.update_version(existing.id, updated_fields)
             if not updated:
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update draft")
+            await self._transition_versions(
+                note_id,
+                from_states=[NoteState.DRAFT, NoteState.NEEDS_REVIEW],
+                to_state=NoteState.OLD_DRAFT,
+                exclude=[updated.id],
+            )
             return updated
 
         draft = await self.repository.create_new_version(
@@ -162,6 +182,12 @@ class NotesService:
             title=payload_title,
             tags=payload_tags,
             vector=vector,
+        )
+        await self._transition_versions(
+            note_id,
+            from_states=[NoteState.DRAFT, NoteState.NEEDS_REVIEW],
+            to_state=NoteState.OLD_DRAFT,
+            exclude=[draft.id],
         )
         return draft
 
@@ -210,12 +236,17 @@ class NotesService:
     @notify_observers("note.deleted")
     async def delete_note(self, note_id: str, deleter_id: str) -> None:
         """Mark a note as deleted (soft delete)."""
-        result = await self.repository.mark_note_deleted(note_id, deleter_id)
-        return result
+        note = await self.repository.get_note(note_id)
+        if not note:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
 
-    async def restore_note(self, note_id: str, restorer_id: str) -> None:
-        """Restore a soft-deleted note."""
-        await self.repository.mark_note_restored(note_id, restorer_id)
+        await self.repository.mark_note_deleted(note_id, deleter_id)
+
+        if note.current_version_id:
+            await self.repository.update_version(
+                note.current_version_id,
+                {"state": NoteState.DELETED, "committed_by": deleter_id},
+            )
 
     async def request_note_deletion(
         self,
@@ -272,6 +303,18 @@ class NotesService:
         # allow restore even if note is currently deleted
 
         reviews_service = ReviewsService(repository=self.repository, notes_service=self)
+
+        if note.current_version_id:
+            current_version = await self.repository.get_version(note.current_version_id)
+            if current_version and current_version.state == NoteState.DELETED:
+                await self.repository.update_version(
+                    current_version.id,
+                    {
+                        "state": NoteState.NEEDS_REVIEW,
+                        "submitted_by": requester_id,
+                    },
+                )
+
         review = await reviews_service.repository.create_review(
             note_id=note_id,
             draft_version_id="",  # empty indicates special operation
@@ -292,6 +335,25 @@ class NotesService:
         )
 
         return review
+
+    async def restore_note(self, note_id: str, restorer_id: str) -> None:
+        """Restore a soft-deleted note."""
+        note = await self.repository.get_note(note_id)
+        if not note:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+        await self.repository.mark_note_restored(note_id, restorer_id)
+
+        if note.current_version_id:
+            await self.repository.update_version(
+                note.current_version_id,
+                {
+                    "state": NoteState.APPROVED,
+                    "committed_by": restorer_id,
+                    "reviewed_by": restorer_id,
+                    "submitted_by": None,
+                },
+            )
 
     async def get_note_metadata(self, note_id: str) -> Note:
         note = await self.repository.get_note(note_id)
@@ -341,10 +403,13 @@ class NotesService:
         allow_deleted: bool = False,
         author: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        sort_by: Optional[Literal["relevance", "upvotes", "downvotes"]] = None,
-    ) -> Tuple[List[Tuple[NoteVersion, float]], int]:
-        # Treat a missing or empty keyword as a wildcard (match_all). This makes an
-        # empty query behave the same as "*" from the UI.
+        sort_by: Optional[Literal["relevance", "author", "created_at", "committed_by"]] = None,
+        committed_by: Optional[str] = None,
+        reviewed_by: Optional[str] = None,
+        states: Optional[List[NoteState]] = None,
+        min_score: Optional[float] = None,
+    ) -> Tuple[List[Tuple[NoteVersion, float]], int, Dict[str, List[str]]]:
+        empty_facets: Dict[str, List[str]] = {"authors": [], "committers": [], "reviewers": [], "tags": []}
         if keyword is None:
             normalized_keyword = ""
         else:
@@ -353,94 +418,80 @@ class NotesService:
                 normalized_keyword = ""
 
         resolved_vector = vector
-        # If a keyword is present, try to compute its embedding so vector search
-        # can participate in the hybrid search. Don't override an explicitly
-        # provided vector. If embedding fails, log and continue with keyword-only.
-        if normalized_keyword and normalized_keyword != "" and resolved_vector is None:
+        if normalized_keyword and resolved_vector is None:
             try:
                 resolved_vector = await compute_embedding(normalized_keyword, settings=self.settings)
             except Exception as exc:  # pragma: no cover - runtime/IO dependent
-                logging.getLogger(__name__).warning("Failed to compute embedding for search keyword; proceeding without vector signal", exc_info=exc)
+                logging.getLogger(__name__).warning(
+                    "Failed to compute embedding for search keyword; proceeding without vector signal",
+                    exc_info=exc,
+                )
+
+        author_token = author.strip() if author and author.strip() else None
+        committed_token = committed_by.strip() if committed_by and committed_by.strip() else None
+        reviewer_token = reviewed_by.strip() if reviewed_by and reviewed_by.strip() else None
+        tag_tokens: List[str] = []
+        if tags:
+            tag_tokens = [tag.strip() for tag in tags if tag and tag.strip()]
 
         candidate_limit = max(offset + limit * 5, 500)
-        normalized_author = author.strip().lower() if author and author.strip() else None
-        normalized_tags: List[str] = []
-        if tags:
-            normalized_tags = sorted({tag.strip().lower() for tag in tags if tag and tag.strip()})
-
-        raw_results = await hybrid_search(
-            self.repository,
-            keyword=normalized_keyword,
+        raw_results, _total_hits, facets = await self.repository.hybrid_search(
+            keyword=normalized_keyword or None,
             vector=resolved_vector,
-            candidate_limit=candidate_limit,
+            limit=candidate_limit,
+            include_drafts=include_drafts,
+            allow_deleted=allow_deleted,
+            states=states,
+            author=author_token,
+            tags=tag_tokens or None,
+            committed_by=committed_token,
+            reviewed_by=reviewer_token,
+            sort_by=sort_by,
         )
+        facets = facets or empty_facets.copy()
 
         if not raw_results:
-            return [], 0
+            return [], 0, facets
 
-        note_ids = [version.note_id for version, _ in raw_results]
+        best_score = max(score for _, score in raw_results)
+        normalized_results: List[Tuple[NoteVersion, float]] = []
+        if best_score > 0:
+            normalized_results = [(version, max(score / best_score, 0.0)) for version, score in raw_results]
+        else:
+            normalized_results = [(version, 0.0) for version, _ in raw_results]
+
+        if min_score is not None:
+            normalized_results = [(version, score) for version, score in normalized_results if score >= min_score]
+            if not normalized_results:
+                return [], 0, facets
+
+        note_ids = [version.note_id for version, _ in normalized_results]
         notes_map = await self.repository.get_notes_by_ids(note_ids)
-        drafts_map = await self.repository.get_drafts_by_note_ids(note_ids) if include_drafts else {}
 
         seen_notes: set[str] = set()
         filtered: List[Tuple[NoteVersion, float]] = []
 
-        for version, score in raw_results:
+        for version, score in normalized_results:
             note_id = version.note_id
             if note_id in seen_notes:
                 continue
             note = notes_map.get(note_id)
             if not note:
                 continue
-            
-            # Filter out deleted notes unless explicitly requested
-            if note.deleted_at is not None and not allow_deleted:
+            if note.deleted_at is not None and not allow_deleted and version.state != NoteState.DELETED:
                 continue
-
-            candidate: Optional[NoteVersion] = None
-            if include_drafts:
-                draft = drafts_map.get(note_id)
-                if draft:
-                    candidate = draft
-
-            if candidate is None:
-                display_version = await self._select_display_version(note)
-                if not display_version or (not include_drafts and display_version.state != NoteState.APPROVED):
-                    continue
-                candidate = display_version
-
-            candidate_author = (candidate.created_by or note.created_by or "").lower()
-            if normalized_author and candidate_author != normalized_author:
-                continue
-
-            if normalized_tags:
-                candidate_tags = {tag.lower() for tag in (candidate.tags or [])}
-                if not all(tag in candidate_tags for tag in normalized_tags):
-                    continue
-
-            filtered.append((candidate, score))
+            filtered.append((version, score))
             seen_notes.add(note_id)
 
         total = len(filtered)
         if total == 0:
-            return [], 0
-
-        # Support optional sorting modes: relevance (default), upvotes, downvotes.
-        if sort_by == "upvotes":
-            # sort by note upvotes descending
-            note_ids = [v.note_id for v, _ in filtered]
-            notes_map = await self.repository.get_notes_by_ids(note_ids)
-            filtered.sort(key=lambda it: notes_map.get(it[0].note_id).upvotes if notes_map.get(it[0].note_id) else 0, reverse=True)
-        elif sort_by == "downvotes":
-            note_ids = [v.note_id for v, _ in filtered]
-            notes_map = await self.repository.get_notes_by_ids(note_ids)
-            filtered.sort(key=lambda it: notes_map.get(it[0].note_id).downvotes if notes_map.get(it[0].note_id) else 0, reverse=True)
+            return [], 0, facets
 
         if offset >= total:
-            return [], total
+            return [], total, facets
 
         page_slice = filtered[offset:offset + limit]
-        return page_slice, total
+        return page_slice, total, facets
 
     async def get_stats(self) -> Dict[str, int]:
         return await self.repository.get_stats()
@@ -464,6 +515,40 @@ class NotesService:
             if version and version.state in {NoteState.APPROVED, NoteState.NEEDS_REVIEW}:
                 tags.update(version.tags)
         return list(tags)
+
+    async def get_all_committers(self) -> List[str]:
+        _, _, facets = await self.repository.hybrid_search(
+            keyword=None,
+            vector=None,
+            limit=1,
+            states=[NoteState.APPROVED, NoteState.NEEDS_REVIEW],
+        )
+        return sorted({value.strip() for value in facets.get("committers", []) if value and value.strip()})
+
+    async def get_all_reviewers(self) -> List[str]:
+        _, _, facets = await self.repository.hybrid_search(
+            keyword=None,
+            vector=None,
+            limit=1,
+            states=[NoteState.APPROVED, NoteState.NEEDS_REVIEW],
+        )
+        return sorted({value.strip() for value in facets.get("reviewers", []) if value and value.strip()})
+
+    async def _transition_versions(
+        self,
+        note_id: str,
+        *,
+        from_states: Iterable[NoteState],
+        to_state: NoteState,
+        exclude: Optional[Iterable[str]] = None,
+    ) -> None:
+        exclude_ids = {identifier for identifier in (exclude or []) if identifier}
+        versions = await self.repository.list_note_versions(note_id)
+        for version in versions:
+            if version.id in exclude_ids:
+                continue
+            if version.state in from_states and version.id:
+                await self.repository.update_version(version.id, {"state": to_state})
 
     async def _select_display_version(self, note: Note) -> Optional[NoteVersion]:
         if note.current_version_id:

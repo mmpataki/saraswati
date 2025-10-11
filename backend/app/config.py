@@ -3,11 +3,10 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, HttpUrl, model_validator
-from typing import Dict
 
 
 DEFAULT_CONFIG_PATH = Path(os.getenv("SARASWATI_CONFIG", Path.cwd() / "config.yml"))
@@ -45,20 +44,6 @@ class NativeAuthConfig(BaseModel):
     cache_ttl_seconds: int = Field(300, description="Default token TTL (seconds) for locally-issued tokens")
 
 
-class MongoConfig(BaseModel):
-    """MongoDB connectivity configuration."""
-
-    uri: str = Field(..., description="Mongo connection string, e.g. mongodb://user:pass@localhost:27017")
-    database: str = Field(..., description="Database name for Saraswati")
-    notes_collection: str = Field("notes", description="Mongo collection storing note metadata")
-    versions_collection: str = Field("note_versions", description="Mongo collection storing note versions")
-    reviews_collection: str = Field("note_reviews", description="Mongo collection storing note review records")
-    review_events_collection: str = Field(
-        "note_review_events",
-        description="Mongo collection storing timeline events for note reviews",
-    )
-
-
 class ElasticsearchConfig(BaseModel):
     """Elasticsearch connectivity configuration."""
 
@@ -89,7 +74,7 @@ class SaraswatiSettings(BaseModel):
     environment: str = Field("development", description="Environment name")
     frontend_base_path: str = Field("/knowledge", description="Base path for the frontend")
     api_prefix: str = Field("/knowledge/api", description="API route prefix")
-    store_backend: Literal["elastic", "mongo"] = Field(
+    store_backend: Literal["elastic"] = Field(
         "elastic",
         description="Primary persistence backend to use for notes data",
     )
@@ -105,7 +90,6 @@ class SaraswatiSettings(BaseModel):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     auth_external: ExternalAuthConfig = Field(default_factory=ExternalAuthConfig)
     auth_native: NativeAuthConfig = Field(default_factory=NativeAuthConfig)
-    mongo: Optional[MongoConfig] = None
     elasticsearch: Optional[ElasticsearchConfig] = None
     embedding: EmbeddingConfig
     # HTTP callback endpoints to notify observers about lifecycle events (order preserved)
@@ -119,10 +103,8 @@ class SaraswatiSettings(BaseModel):
 
     @model_validator(mode="after")
     def _validate_backend(self) -> "SaraswatiSettings":
-        if self.store_backend == "mongo" and not self.mongo:
-            raise ValueError("Mongo configuration required when 'store_backend' is set to 'mongo'")
-        if self.store_backend == "elastic" and not self.elasticsearch:
-            raise ValueError("Elasticsearch configuration required when 'store_backend' is set to 'elastic'")
+        if not self.elasticsearch:
+            raise ValueError("Elasticsearch configuration is required for this application")
         # Auth configuration sanity checks
         if self.auth_system in ("decode", "elastic") and not self.auth_native.jwt_secret:
             raise ValueError("auth_native.jwt_secret is required when auth_system is 'decode' or 'elastic'")

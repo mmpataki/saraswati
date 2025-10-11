@@ -1,4 +1,4 @@
-export type NoteState = "draft" | "needs_review" | "approved";
+export type NoteState = "draft" | "needs_review" | "old_draft" | "approved" | "deleted" | "old";
 
 export type ReviewStatus = "open" | "changes_requested" | "merged" | "closed";
 
@@ -93,12 +93,20 @@ export type SearchResult = {
   score: number;
 };
 
+export type SearchFacets = {
+  authors: string[];
+  committers: string[];
+  reviewers: string[];
+  tags: string[];
+};
+
 export type SearchResponse = {
   items: SearchResult[];
   page: number;
   page_size: number;
   total: number;
   total_pages: number;
+  facets: SearchFacets;
 };
 
 export type NotesStats = {

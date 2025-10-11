@@ -337,6 +337,25 @@ def downvote_note(note_id: str) -> str:
 
 
 @mcp.tool()
+def discard_draft(note_id: str) -> str:
+    """
+    Discard the draft for a note.
+    
+    Inputs:
+        note_id: ID of the note whose draft should be discarded
+    
+    Returns YAML with success confirmation or an error.
+    """
+    if not note_id:
+        return _dump_yaml({"error": "note_id is required"})
+    
+    result = _request("delete", f"/notes/{note_id}/draft")
+    if "error" in result:
+        return _dump_yaml({"error": "Failed to discard draft", "details": result})
+    return _dump_yaml({"success": True, "message": "Draft discarded successfully"})
+
+
+@mcp.tool()
 def search_notes(
     query: Optional[str] = None,
     page_size: int = 10,
